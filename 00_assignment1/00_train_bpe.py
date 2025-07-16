@@ -9,6 +9,7 @@ import os
 import time
 import json
 import psutil
+from filelock import FileLock
 
 def find_chunk_boundaries(
     file: BinaryIO, 
@@ -121,31 +122,33 @@ def initialize_symbol_sequences(chunk):
 def merge_pair_single(temp_path, num_chunk, most_freq_pair, new_symbol_input):
     new_symbols_list = []
     load_path = temp_path / f'symbol_sequence_{num_chunk}.pkl'
-    with open(load_path, 'rb') as f:
-        symbols_list = pickle.load(f)   # load stories
+    lock_path = str(load_path) + ".lock"
+    with FileLock(lock_path):
+        with open(load_path, 'rb') as f:
+            symbols_list = pickle.load(f)   # load stories
 
-    for symbols in symbols_list:  # load one story
-        new_symbol = []
-        for symbol in symbols:  # load one word
-            new_seq = []
-            i = 0
-            while i < len(symbol):
-                if(i < len(symbol)-1 and (symbol[i], symbol[i+1]) == most_freq_pair):
-                    new_seq.append(new_symbol_input)  # merge
-                    i += 2
-                else:
-                    new_seq.append(symbol[i])
-                    i += 1
-            new_symbol.append(new_seq) # words
-        new_symbols_list.append(new_symbol)
+        for symbols in symbols_list:  # load one story
+            new_symbol = []
+            for symbol in symbols:  # load one word
+                new_seq = []
+                i = 0
+                while i < len(symbol):
+                    if(i < len(symbol)-1 and (symbol[i], symbol[i+1]) == most_freq_pair):
+                        new_seq.append(new_symbol_input)  # merge
+                        i += 2
+                    else:
+                        new_seq.append(symbol[i])
+                        i += 1
+                new_symbol.append(new_seq) # words
+            new_symbols_list.append(new_symbol)
 
-    try:
-        test = new_symbols_list[0][0][0]
-    except Exception:
-        new_symbols_list = [[[]]]  # If empty, return a list with an empty word
-    
-    with open(load_path, 'wb') as f:
-        pickle.dump(new_symbols_list, f)
+        try:
+            test = new_symbols_list[0][0][0]
+        except Exception:
+            new_symbols_list = [[[]]]  # If empty, return a list with an empty word
+        
+        with open(load_path, 'wb') as f:
+            pickle.dump(new_symbols_list, f)
     return
 
 def train_bpe(input_path:str, # Path to a text file with BPE tokenizer training data
@@ -224,6 +227,7 @@ def train_bpe(input_path:str, # Path to a text file with BPE tokenizer training 
         # print("Current sequences:", symbol_sequences)
         # print("Current merges:", merges)
         # print("Current vocab:", vocab)
+        print(f"Current vocabulary size: {len(vocab)}")
         print(f"Elapsed time for this merge: {elapsed_time:.4f} seconds")
         print("-" * 40)
     return vocab, merges
