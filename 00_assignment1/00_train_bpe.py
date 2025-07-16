@@ -99,13 +99,16 @@ def extract_unique_chars(chunk):
             unique_chars.add(char)
     return unique_chars
 
-def calculate_bigrams(symbol_sequence_chunk) -> Counter:
+def calculate_bigrams(temp_path, num_chunk) -> Counter:
     bigram_freq = Counter()
-    for symbol_sequence in symbol_sequence_chunk:
+    load_path = temp_path / f'symbol_sequence_{num_chunk}.pkl'
+    with open(load_path, 'rb') as f:
+        symbol_sequences = pickle.load(f)
+    for symbol_sequence in symbol_sequences:
         for symbols in symbol_sequence:
             for i in range(len(symbols) - 1):
                 pair = (symbols[i], symbols[i+1])
-                bigram_freq[pair] += 1
+                bigram_freq.update([pair])
     return bigram_freq
 
 def initialize_symbol_sequences(chunk):
@@ -115,29 +118,41 @@ def initialize_symbol_sequences(chunk):
             symbol_sequences[i].append(list(word))
     return symbol_sequences
 
-def merge_pair_single(symbols_list, most_freq_pair, new_symbol):
-    new_symbols = []
-    for symbols in symbols_list:
-        new_seq = []
-        i = 0
-        while i < len(symbols)-1:
-            if(symbols[i], symbols[i+1]) == most_freq_pair:
-                new_seq.append(new_symbol)  # merge
-                i += 2
-            else:
-                new_seq.append(symbols[i])
-                i += 1
-        # if len(symbols) != len(new_seq):
-            # print(f"before -> after: {len(symbols), len(new_seq)}")
-        if new_seq != []:
-            new_symbols.append(new_seq)
-    # print(len(new_symbols))
-    return new_symbols
+def merge_pair_single(temp_path, num_chunk, most_freq_pair, new_symbol_input):
+    new_symbols_list = []
+    load_path = temp_path / f'symbol_sequence_{num_chunk}.pkl'
+    with open(load_path, 'rb') as f:
+        symbols_list = pickle.load(f)   # load stories
+
+    for symbols in symbols_list:  # load one story
+        new_symbol = []
+        for symbol in symbols:  # load one word
+            new_seq = []
+            i = 0
+            while i < len(symbol):
+                if(i < len(symbol)-1 and (symbol[i], symbol[i+1]) == most_freq_pair):
+                    new_seq.append(new_symbol_input)  # merge
+                    i += 2
+                else:
+                    new_seq.append(symbol[i])
+                    i += 1
+            new_symbol.append(new_seq) # words
+        new_symbols_list.append(new_symbol)
+
+    try:
+        test = new_symbols_list[0][0][0]
+    except Exception:
+        new_symbols_list = [[[]]]  # If empty, return a list with an empty word
+    
+    with open(load_path, 'wb') as f:
+        pickle.dump(new_symbols_list, f)
+    return
 
 def train_bpe(input_path:str, # Path to a text file with BPE tokenizer training data
               vocab_size:int, # A positive integer that defines the maximum final vocabulary size
               special_tokens:list[str], # A list of special tokens to be removed from the text
               num_processes:int,
+              num_chunks:int,
               temp_path:Path):
     if(num_processes <= 0):
         num_processes = 1
@@ -145,7 +160,7 @@ def train_bpe(input_path:str, # Path to a text file with BPE tokenizer training 
 
     # Load the file and get chunks and remove special tokens
     chunks:list[list[str]] = get_chunks_from_file(file_path = input_path,
-                                                  num_processes = num_processes,
+                                                  num_processes = num_chunks,
                                                   special_token = special_tokens[0])
     
     # Initialize the vocabulary and merges
@@ -153,7 +168,7 @@ def train_bpe(input_path:str, # Path to a text file with BPE tokenizer training 
     merges:list[tuple[bytes, bytes]] = []
 
     for special_token in special_tokens:
-        vocab[len(vocab)] = special_token.encode('utf-8')  # Add the special token to the vocabulary
+        vocab[special_token.encode('utf-8')] = len(vocab)
 
     # Parallel extraction of unique characters
     print("Extracting unique characters from chunks in parallel...")
@@ -170,28 +185,12 @@ def train_bpe(input_path:str, # Path to a text file with BPE tokenizer training 
 
     # Build the vocabulary from all unique characters
     for char in all_unique_chars:
-        vocab[len(vocab)] = char.encode("utf-8")  # Store characters as bytes
+        vocab[char.encode("utf-8")] = len(vocab)
     print("Unique characters extracted")
 
-    # print("Calculating word frequencies in parallel...")
-    # with Pool(processes=num_processes) as pool:
-    #     results = []
-    #     for res in tqdm(pool.imap(calculate_word_frequency, chunks), total=len(chunks)):
-    #         results.append(res)
-
-    # # Combine results from all processes
-    # total_word_freq = Counter()
-    # for word_freq in results:
-    #     total_word_freq.update(word_freq)
-    # print("Word frequencies calculated.")
-
-    # Initialize symbol sequences with parallel processing
-    print("Initializing symbol sequences in parallel...")
-    symbol_sequences = []
-    # with Pool(processes=num_processes) as pool:
-    #     for seq in tqdm(pool.imap(initialize_symbol_sequences, (chunk for chunk in chunks)), total=len(chunks)):
-    #         symbol_sequences.append(seq)
-    for i,chunk in tqdm(enumerate(chunks)):
+    # Initialize symbol sequences
+    print("Initializing symbol sequences...")
+    for i,chunk in tqdm(enumerate(chunks), total=len(chunks)):
         symbol_sequence = initialize_symbol_sequences(chunk)
         save_path = temp_path / f'symbol_sequence_{i}.pkl'
         with open(save_path, 'wb') as f:
@@ -201,17 +200,13 @@ def train_bpe(input_path:str, # Path to a text file with BPE tokenizer training 
 
     print("Symbol sequences initialized.")
 
-    return vocab, merges
     while len(vocab) < vocab_size:
         # 1. Count bigrams over all words in all stories
         start_time = time.time()
-        with Pool(processes=num_processes) as pool:
-            bigram_freq_list = pool.map(calculate_bigrams, (symbol_sequence for symbol_sequence in symbol_sequences))
         bigram_freq = Counter()
-        for item in bigram_freq_list:
-            bigram_freq += item
-        if not bigram_freq:
-            break
+        with Pool(processes=num_processes) as pool:
+            for freq in pool.starmap(calculate_bigrams, [(temp_path, i) for i in range(num_chunks)]):
+                bigram_freq.update(freq)
 
         # 2. Find most frequent bigram
         most_freq_pair = max(bigram_freq, key=bigram_freq.get)
@@ -220,16 +215,15 @@ def train_bpe(input_path:str, # Path to a text file with BPE tokenizer training 
         vocab[new_symbol.encode('utf-8')] = len(vocab)
 
         # 3. Merge the most frequent pair in all words of all stories
-        for i in range(len(symbol_sequences)):
-            with Pool(processes=num_processes) as pool:
-                symbol_sequences[i] = pool.starmap(merge_pair_single, [(word, most_freq_pair, new_symbol) for word in symbol_sequences[i]])
+        with Pool(processes=num_processes) as pool:
+            pool.starmap(merge_pair_single, [(temp_path, i, most_freq_pair, new_symbol) for i in range(num_chunks)])
 
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(f"Merged: {most_freq_pair} -> {new_symbol}")
         # print("Current sequences:", symbol_sequences)
-        print("Current merges:", merges)
-        print("Current vocab:", vocab)
+        # print("Current merges:", merges)
+        # print("Current vocab:", vocab)
         print(f"Elapsed time for this merge: {elapsed_time:.4f} seconds")
         print("-" * 40)
     return vocab, merges
@@ -241,16 +235,24 @@ if __name__ == "__main__":
         TEMP_PATH.mkdir(parents=True, exist_ok=True)
     TRAIN_DATA_PATH = FILE_PATH / "TinyStoriesV2-GPT4-train.txt"
     VALID_DATA_PATH = FILE_PATH / "TinyStoriesV2-GPT4-valid.txt"
+    TINY_DATA_PATH = FILE_PATH / "TinyStoriesV2-GPT4-tiny.txt"
     # NUM_PROCESSES = psutil.cpu_count(logical=False)  # Number of processes to use for parallel processing
-    NUM_PROCESSES = 8  # Set to a fixed number for testing
+    NUM_PROCESSES = 4  # Set to a fixed number for testing
+    NUM_CHUNKS = NUM_PROCESSES*2  # Number of chunks to split the data into
 
     special_tokens = ["<|endoftext|>"]
-    vocab, merges = train_bpe(input_path=TRAIN_DATA_PATH,
+    vocab, merges = train_bpe(input_path=VALID_DATA_PATH,
                               vocab_size=10000,
                               special_tokens=special_tokens,
                               num_processes=NUM_PROCESSES,
+                              num_chunks=NUM_CHUNKS,
                               temp_path=TEMP_PATH)
     
+    # Delete all files in TEMP_PATH
+    for temp_file in TEMP_PATH.glob("*"):
+        if temp_file.is_file():
+            temp_file.unlink()
+
     # Ensure the output directory exists
     output_dir = Path("00_self_data/tokenizer")
     output_dir.mkdir(parents=True, exist_ok=True)
